@@ -18,11 +18,12 @@ _batch_cell_list: object | None = None
 def _import_nvalchemiops_batch_neighbors() -> tuple[object, object] | None:
     """Return ``(batch_cell_list, batch_naive_neighbor_list)`` if importable."""
     try:
+        from nvalchemiops.neighbors.neighbor_utils import estimate_max_neighbors as emn
         from nvalchemiops.torch.neighbors import batch_cell_list as bcl
         from nvalchemiops.torch.neighbors import batch_naive_neighbor_list as bnl
     except (ImportError, RuntimeError):
         return None
-    return bcl, bnl
+    return bcl, bnl, emn
 
 
 _bound_batch_neighbors = _import_nvalchemiops_batch_neighbors()
@@ -30,7 +31,11 @@ ALCHEMIOPS_AVAILABLE = _bound_batch_neighbors is not None
 
 if ALCHEMIOPS_AVAILABLE:
     assert _bound_batch_neighbors is not None  # noqa: S101
-    _batch_cell_list, _batch_naive_neighbor_list = _bound_batch_neighbors
+    (
+        _batch_cell_list,
+        _batch_naive_neighbor_list,
+        _estimate_max_neighbors,
+    ) = _bound_batch_neighbors
 
     def alchemiops_nl_n2(
         positions: torch.Tensor,
@@ -53,7 +58,8 @@ if ALCHEMIOPS_AVAILABLE:
             self_interaction: If True, include self-pairs
             max_neighbors: Width of the per-atom neighbor matrix. Must be an upper
                 bound; an undersized width raises NeighborOverflowError. Defaults
-                to nvalchemiops' bulk-density estimate for ``cutoff``.
+                to the bulk-density estimate for ``cutoff`` with a higher
+                atomic_density (0.3) than nvalchemiops' default.
 
         Returns:
             (mapping, system_mapping, shifts_idx)
@@ -63,6 +69,12 @@ if ALCHEMIOPS_AVAILABLE:
 
         if _batch_naive_neighbor_list is None:
             raise RuntimeError("nvalchemiops neighbor list is unavailable")
+
+        # nvalchemiops' default atomic_density (0.2) undersizes the neighbor
+        # matrix for dense packing; estimate with 0.3 instead.
+        # https://github.com/NVIDIA/nvalchemi-toolkit-ops/issues/114
+        if max_neighbors is None:
+            max_neighbors = _estimate_max_neighbors(cutoff=cutoff, atomic_density=0.3)
 
         res = _batch_naive_neighbor_list(
             positions=positions,

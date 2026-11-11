@@ -391,6 +391,59 @@ def test_neighbor_list_implementations(
     assert torch.equal(batch[mapping[0]], mapping_system)
 
 
+@pytest.mark.skipif(
+    not neighbors.ALCHEMIOPS_AVAILABLE, reason="nvalchemiops is not installed"
+)
+def test_alchemiops_n2_default_max_neighbors_handles_dense_system() -> None:
+    """Regression: dense systems overflow with nvalchemiops' default width.
+
+    On compressed fcc Cu, calls nvalchemiops' batch_naive_neighbor_list
+    without max_neighbors — upstream then sizes the neighbor matrix with its
+    default atomic_density=0.2, which raises NeighborOverflowError — then
+    calls alchemiops_nl_n2 with an explicit
+    estimate_max_neighbors(atomic_density=0.3) width, and with the wrapper
+    default, which must match it.
+    See NVIDIA/nvalchemi-toolkit-ops#114.
+    """
+    from nvalchemiops.neighbors.neighbor_utils import estimate_max_neighbors
+    from nvalchemiops.torch.neighbors import batch_naive_neighbor_list as bnl
+
+    cutoff = 4.7
+    cu = bulk("Cu", "fcc", a=2.5, cubic=True)
+    pos, cell, pbc, system_idx, _ = ase_to_torch_batch([cu], device=DEVICE, dtype=DTYPE)
+    kwargs = {
+        "positions": pos,
+        "cutoff": cutoff,
+        "batch_idx": system_idx.to(torch.int32),
+        "cell": cell,
+        "pbc": pbc.to(torch.bool),
+        "return_neighbor_list": True,
+    }
+
+    # Upstream's default width (atomic_density=0.2) is undersized -> overflow.
+    # Name- or message-matched, since the exact exception type/message of the
+    # upstream overflow is not a public API we want to pin against.
+    with pytest.raises(Exception) as excinfo:  # noqa: PT011
+        bnl(max_neighbors=None, **kwargs)
+    assert "overflow" in (type(excinfo.value).__name__ + str(excinfo.value)).lower()
+
+    # A width estimated with atomic_density=0.3 is wide enough -> succeeds,
+    # both when passed explicitly and via the wrapper default (which uses 0.3).
+    nl_kwargs = {
+        "positions": pos,
+        "cell": cell,
+        "pbc": pbc,
+        "system_idx": system_idx,
+        "cutoff": cutoff,
+    }
+    width_030 = estimate_max_neighbors(cutoff=cutoff, atomic_density=0.3)
+    mapping, _, _ = neighbors.alchemiops_nl_n2(**nl_kwargs, max_neighbors=width_030)
+    assert mapping.shape[1] > 0
+
+    mapping_default, _, _ = neighbors.alchemiops_nl_n2(**nl_kwargs)
+    assert torch.equal(mapping, mapping_default)
+
+
 @pytest.mark.parametrize("self_interaction", [True, False])
 @pytest.mark.parametrize("pbc_val", [True, False])
 @pytest.mark.parametrize("nl_implementation", _all_nl_backends())
